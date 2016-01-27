@@ -237,6 +237,14 @@ plc_t *plc_init_modbus(char* net_addr, int net_port, int modbus_addr, int nDI, i
 	modbus_set_debug(plc->mb_slave,debug_flag);		// print detailed modbus debugging info or not
 	plc->verbose=debug_flag;						// also set the local flag for quick reference
 
+	// increase modbus response timeout
+	printf("Setting modbus response timeout to %u sec, %ul usec\n",
+		MODBUS_RESPONSE_TIMEOUT_SEC, 
+		MODBUS_RESPONSE_TIMEOUT_USEC);
+	plc->response_timeout.tv_sec=MODBUS_RESPONSE_TIMEOUT_SEC;
+	plc->response_timeout.tv_usec=MODBUS_RESPONSE_TIMEOUT_USEC;
+	modbus_set_response_timeout(plc->mb_slave,&plc->response_timeout);
+
 	if (modbus_connect(plc->mb_slave) == -1) {
 		fprintf(stderr, "plc_init: Connection to modbus slave %d failed: %s\n",modbus_addr, modbus_strerror(errno));
 		modbus_free(plc->mb_slave);
@@ -278,12 +286,6 @@ plc_t *plc_init_tipc_client(uint32_t tipc_name_type, uint32_t tipc_name_instance
 			plc->state->DO[i]=FALSE;
 	plc->state->status=PLC_STATUS_INIT;
 	
-	// connect to modbus tcp slave
-	// plc->mb_slave = modbus_new_tcp(net_addr, net_port); // connect to remote modbus tcp slave(server). we're modbus master(client)
-	// modbus_set_slave(plc->mb_slave, bus_addr);	// set address of remote modbus slave id we want to talk to
-	// modbus_set_debug(plc->mb_slave,debug_flag);		// print detailed modbus debugging info or not
-	plc->verbose=debug_flag;						// also set the local flag for quick reference
-
 	// set values in plc struct
 	plc->connection_type=PLC_CONNECTION_TIPC;
 	

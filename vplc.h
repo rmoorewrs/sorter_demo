@@ -17,6 +17,9 @@
 #define MAX_INPUTS	16
 #define MAX_OUTPUTS	16
 
+#define MODBUS_RESPONSE_TIMEOUT_SEC	10
+#define MODBUS_RESPONSE_TIMEOUT_USEC	0
+
 enum {
 	PLC_STATUS_INIT=0,
 	PLC_STATUS_CLEAN,
@@ -51,6 +54,7 @@ typedef struct _plc {
 	int connection_type;
 	int verbose;
 	long update_count;
+	struct timeval	response_timeout;
 	plc_state_t *state;
 	
 	// TIPC Client specific 
