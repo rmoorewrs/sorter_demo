@@ -15,3 +15,5 @@ To reset the state of the factory via modbus, use the 'r' option
 To make sorter_demo relay messages via the TIPC gateway, with gateway running:
 
 ./sorter_demo t
+
+
