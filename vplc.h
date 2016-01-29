@@ -12,6 +12,10 @@
 #include <netinet/in.h>
 #include <linux/tipc.h>
 
+/* IPC specific header files */
+#include <common.h>
+#include <mesg_service.h>
+#include <mesg_common.h>
 
 #define MAX_BUFSIZE	64
 #define MAX_INPUTS	16
@@ -19,6 +23,19 @@
 
 #define MODBUS_RESPONSE_TIMEOUT_SEC	10
 #define MODBUS_RESPONSE_TIMEOUT_USEC	0
+
+enum {
+	MODE_ACTIVE = 0,
+	MODE_STANDBY
+};
+
+typedef struct heartbeat_msg
+{
+        int instance;
+        int mode;
+	int current_state;
+} hbmsg_t;
+
 
 enum {
 	PLC_STATUS_INIT=0,
@@ -39,12 +56,12 @@ enum {
 
 // set up global state variable table
 typedef struct _plc_state {
-	int current_state;
+	int     current_state;
 	uint8_t	status;
 	uint8_t nDI;
 	uint8_t nDO;
 	uint8_t	DI[MAX_INPUTS];
-	uint8_t	 DO[MAX_OUTPUTS];
+	uint8_t	DO[MAX_OUTPUTS];
 } plc_state_t;
 
 typedef struct _plc {
@@ -57,8 +74,14 @@ typedef struct _plc {
 	long update_count;
 	struct timeval	response_timeout;
 	plc_state_t *state;
+	int mode;       /* mode of this node */
+	int other_mode; /* mode of other node */
+	int instance;
+	pthread_t client_thread;
 	
 	// TIPC Client specific 
+	mesg_conn_t *conn;
+
 	int tipc_socket;
 	uint32_t tipc_name_type;
 	uint32_t tipc_name_instance;
@@ -67,7 +90,7 @@ typedef struct _plc {
 } plc_t;
 
 
-plc_t *plc_init_modbus(char* net_addr, int net_port, int bus_addr, int nDI, int nDO, int debug_flag);
+plc_t *plc_init_modbus(char* net_addr, int instance, int net_port, int bus_addr, int nDI, int nDO, int debug_flag);
 plc_t *plc_init_tipc_client(uint32_t tipc_name_type, uint32_t tipc_name_instance, int tipc_wait, int nDI, int nDO, int debug_flag);
 plc_t *plc_tipc_modbus_server(uint32_t tipc_name_type, uint32_t tipc_name_instance, char *net_address, int net_port, int modbus_addr, int nDI, int nDO, int debug_flag);
 void plc_state_print(plc_state_t *state, int n_inputs, int n_outputs);
@@ -76,6 +99,7 @@ int plc_state_write(plc_t *plc, plc_state_t *state);
 int plc_state_update(plc_t *plc);
 void plc_shutdown(plc_t *plc);
 int plc_timer(plc_t *plc,int timer_index);
+void plc_init_heartbeat(plc_t *plc);
 
 // tipc client backend functions
 void tipc_plc_wait_for_server(__u32 name_type, __u32 name_instance, int wait);

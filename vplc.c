@@ -17,14 +17,25 @@
 #include <string.h>
 #include <memory.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <errno.h>
 #include <time.h>
 #include <netinet/in.h>
 #include <linux/tipc.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <modbus.h>
 #include <vplc.h>
 
+static void *hb_server (void *param);
+static void *hb_client (void *param);
+static void sighand (int signo);
 
+static sem_t hb_mutex;
+static int hb_received = 0;
+static int hb_client_run = 0;
+
+#define HB_LOOP_PERIOD_USEC      200000 /* 5 Hz */
 
 int plc_state_read(plc_t *plc, plc_state_t *state)
 {
@@ -84,6 +95,7 @@ int plc_state_update(plc_t *plc)
 	int i,rc;
 	uint8_t	ibuf[sizeof(plc_state_t)],obuf[sizeof(plc_state_t)];
 	plc_state_t *plcstate, svt;
+	static int hb_timeout = 0;
 
 	if (plc==0 || plc->state==0){
 			fprintf(stderr,"plc_state_update: NULL pointer\n");
@@ -95,12 +107,11 @@ int plc_state_update(plc_t *plc)
 	ndo=plcstate->nDO;
 	status=plcstate->status;
 
-
-	
 	// modbus functions use the buffer passed in for return values, so make a copy
 	// to avoid corrupting the SVT
 	memmove(obuf,plcstate->DO,MAX_OUTPUTS*sizeof(uint8_t));
 	if  (plc->connection_type==PLC_CONNECTION_MODBUS) {
+	    if  (plc->mode == MODE_ACTIVE) {
 		rc = modbus_write_bits(plc->mb_slave, 0, ndo, obuf);
 		if (rc != ndo) {
 			printf("plc_state_write: ERROR writing to modbus (%d)", rc);
@@ -116,7 +127,7 @@ int plc_state_update(plc_t *plc)
 			printf("Address = %d, value = %.2x\n", 0,obuf[0]);
 			return (-1);
 		}
-				
+    	   } /* if mode == MODE_ACTIVE */
 	} else if (plc->connection_type==PLC_CONNECTION_TIPC) {
 		/* TODO -- this is where the client sends the SVT to the server, the server must 
 		*	forward the SVT on to the modbus slave and send the updated SVT back
@@ -173,12 +184,62 @@ int plc_state_update(plc_t *plc)
 		plcstate->DI[i]=ibuf[i];
 	
 	}
-	// set status flag to clean because we just synched with remote successfully
+	// set status flag to clean because we just synched with remote
+        // successfully
 	plcstate->status=PLC_STATUS_CLEAN;
 
+	/* Check for heartbeats. */
+	sem_wait(&hb_mutex);
+	if (hb_received) {
+		hb_timeout = 0;
+		hb_received = 0;
+		/*
+		 * Our peer is alive, now that we're receiving heartbeats again
+		 */
+		if (!hb_client_run) {
+			printf ("Restarting heartbeat client thread...\n");
+
+	 		/* Switch us to STANDBY mode if our peer is ACTIVE. */
+			if ((plc->mode == MODE_ACTIVE) &&
+			    (plc->other_mode == MODE_ACTIVE)) {
+				plc->mode = MODE_STANDBY;
+				printf ("Switched to STANDBY mode\n");
+			}
+
+			/* Restart our heartbeat client */
+			plc->conn = NULL;
+			hb_client_run = 1;
+			if (pthread_create (&plc->client_thread, NULL,
+			    		    hb_client, (void *)plc)) {
+				fprintf(stderr,
+					"Error creating client thread\n");
+				exit (-1);
+			}
+		}
+	} else if (hb_client_run) {
+		hb_timeout++;
+	}
+	sem_post(&hb_mutex);
+
+	/* Only check for peer heartbeats if our client is alive. */
+	if ((hb_client_run) && (hb_timeout > 6)) {
+		hb_timeout = 0;
+
+		/* Uh oh - looks like other instance failed. */
+		printf ("Loss of peer heartbeat\n");
+
+ 		/* Switch us to ACTIVE mode if we're STANDBY. */
+		if (plc->mode != MODE_ACTIVE) {
+			plc->mode = MODE_ACTIVE;
+			printf ("Switched to ACTIVE mode\n");
+		}
+
+		/* Kill our client thread (if running). */
+		if (plc->client_thread)
+			pthread_kill (plc->client_thread, SIGALRM);
+	}
+
 	return (0);
-
-
 }
 
 
@@ -206,11 +267,50 @@ void plc_state_print(plc_state_t *state,int ni, int no)
 	printf("\n");
 }
 
-
-plc_t *plc_init_modbus(char* net_addr, int net_port, int modbus_addr, int nDI, int nDO, int debug_flag)
+void plc_init_heartbeat (plc_t *plc)
 {
-	int i;
+	pthread_t server_thread;
+
+	/* Create a pthread to receive heartbeat messages */
+	if (pthread_create (&server_thread, NULL, hb_server, (void *)plc)) {
+		fprintf(stderr, "Error creating server thread\n");
+		exit (-1);
+	}
+
+	/* Wait here to see if we receive heartbeats from a peer */
+	sleep (2);
+	sem_wait (&hb_mutex);
+	if (!hb_received) {
+		/*
+		 * No heartbeat from peer, we must be the first one up.
+		 * Set mode to ACTIVE.
+		 */
+		plc->mode = MODE_ACTIVE;
+		printf("Setting to MODE_ACTIVE\n");
+	} else {
+		plc->mode = MODE_STANDBY;
+		printf("Setting to MODE_STANDBY\n");
+	}
+	sem_post (&hb_mutex);
+
+	/* Create initial heartbeat client thread */
+	if (!hb_client_run) {
+		plc->conn = NULL;
+		hb_client_run = 1;
+		if (pthread_create (&plc->client_thread, NULL,
+				    hb_client, (void *)plc)) {
+			fprintf(stderr, "Error creating client thread\n");
+			exit (-1);
+		}
+	}
+}
+
+plc_t *plc_init_modbus(char* net_addr, int instance, int net_port, int modbus_addr, int nDI, int nDO, int debug_flag)
+
+{
+	int i, rc;
 	plc_t *plc;
+	struct sigaction actions;
 
 	// allocate and initialize plc device
 	plc=malloc(sizeof(plc_t));
@@ -250,13 +350,34 @@ plc_t *plc_init_modbus(char* net_addr, int net_port, int modbus_addr, int nDI, i
 		modbus_free(plc->mb_slave);
 		exit(-1);
 	}
+
+	/* create, initialize semaphore */
+	if (sem_init (&hb_mutex, 1, 1) < 0) {
+		perror("semaphore initilization");
+		exit(-1);
+	}
+
+	/* setup sighandler for client thread */
+	memset(&actions, 0, sizeof(actions));
+	sigemptyset(&actions.sa_mask);
+	actions.sa_flags = 0;
+	actions.sa_handler = sighand;
+
+	rc = sigaction (SIGALRM, &actions, NULL);
+	if (rc < 0) {
+		perror("signal initilization");
+		exit(-1);
+	}
+
 	// set values in plc struct
 	plc->connection_type=PLC_CONNECTION_MODBUS;
 	strncpy(plc->net_addr,net_addr,17); // ip address string should be less than 16 bytes: aaa.bbb.ccc.ddd
 	plc->net_port=net_port;
 	plc->modbus_addr=modbus_addr; 
+	plc->instance = instance;
 
-    return(plc);
+
+	return(plc);
 
 }
 
@@ -384,9 +505,10 @@ plc_t *plc_tipc_modbus_server(uint32_t tipc_name_type, uint32_t tipc_name_instan
 	plc_state_t *plcstate;
 	int svt_size;
 	socklen_t alen = sizeof(client_addr);
+	int instance = 0;
 
 	// use the normal modbus init function to start with 
-	plc=plc_init_modbus(net_address, net_port, modbus_addr, nDI, nDO, debug_flag);
+	plc=plc_init_modbus(net_address, instance, net_port, modbus_addr, nDI, nDO, debug_flag);
 
 	// set values in plc struct
 	plc->connection_type=PLC_CONNECTION_TIPC_GATEWAY;
@@ -476,9 +598,149 @@ plc_t *plc_tipc_modbus_server(uint32_t tipc_name_type, uint32_t tipc_name_instan
     return(plc);
 }
 
+static void *hb_server (void *param) 
+    {
+    status_t status;
+    mesg_async_chan_t *chan;
+    mesg_async_info_t async_info;
+    mesg_chan_id_t achid;
+    string_t msg;
+    hbmsg_t *hbmsg;
+    char cvalue[10];
+    plc_t *plc = (plc_t *)param;
 
+    /* give each node a unique channel to listen on */
+    sprintf (cvalue,"%d", 1000 + plc->instance);
+        
+    printf ("Starting heartbeat server thread. CHID = %s\n", cvalue);
+    
+    chan = SSAPI_mesg_AsyncChanCreate (cvalue, MESG_CHAN_SERVICE_GLOBAL, 1024);
+    if (chan == NULL)
+        {
+        printf ("Server: Failed to create asynchronous channel \n");
+        exit(1);
+        }
 
+    /* Get the async channel ID */
+    achid = SSAPI_mesg_AsyncGetChanId (chan);
+    
+    while (1)
+        {
+        /* Wait for messages */
+        msg = SSAPI_mesg_AsyncReceive (achid, &async_info);
+     
+        if (msg != NULL)
+            {
+            /* Got something! */
+            hbmsg = MESG_GET_DATAPTR (msg); 
+            sem_wait(&hb_mutex);
+            hb_received = 1;
+            plc->other_mode = hbmsg->mode;
+            if (plc->mode == MODE_STANDBY) /* sync state with ACTIVE */
+                plc->state->current_state = hbmsg->current_state;
+            sem_post(&hb_mutex);
+            //printf("HB: instance %d mode %d\n", hbmsg->instance, hbmsg->mode);
 
+#if 0
+            /* Verify only one instance is active */
+            if ((hbmsg->mode == MODE_ACTIVE) &&
+                (plc->mode == MODE_ACTIVE))
+                {
+                /*
+                 * The other node reports that he's active,
+                 * we're active too, so switch us to standby.
+                 */
+                printf ("We're currently ACTIVE but other instance %d reports "
+                        "the same. Switching us to STANDBY ...\n",
+                        hbmsg->instance);
+                plc->mode == MODE_STANDBY;
+                }
 
+            /* ... and verify only one instance is standby */
+            if ((hbmsg->mode == MODE_STANDBY) &&
+                (plc->mode == MODE_STANDBY))
+                {
+                /*
+                 * The other node reports that he's standby,
+                 * we're standby too, so switch us to active.
+                 */
+                printf ("We're currently STANDBY but other instance %d reports "
+                        "the same. Switching us to ACTIVE ...\n",
+                        hbmsg->instance);
+                plc->mode == MODE_ACTIVE;
+                }
+#endif
 
+            /* It's our responsibility:to free the buffer */
+            SSAPI_mesg_FreeBuffer (msg);
+            }
+        else 
+            {
+            /* Uh-oh! */
+            printf ("Server [%d]: Failed to receive!\n Error = %d\n",
+                    plc->instance, errno);
+            }
+        }
+    pthread_exit (0);
+    }
 
+static void *hb_client (void *param) 
+{
+	plc_t *plc = (plc_t *)param;
+	char cvalue[10];
+	status_t status;
+        hbmsg_t *hbmsg;
+
+	/* Create async client connection to the other instance */
+	printf ("Starting heartbeat client thread...\n");
+	if (plc->instance == 1) {
+		sprintf (cvalue,"1002");
+	} else {
+		sprintf (cvalue,"1001");
+	}
+	plc->conn = SSAPI_mesg_AsyncChanConnect (cvalue,
+						 MESG_CHAN_SERVICE_GLOBAL,
+						 1024);
+	if (plc->conn == NULL) {
+		fprintf (stderr, "No other sorter instance found - "
+			 "disabling heartbeat\n");
+		pthread_exit (0);
+	}
+
+	/* Loop */
+	while (hb_client_run) {
+		/* Let the other instance know we're alive (heartbeat) */
+		hbmsg = SSAPI_mesg_AllocBuffer (sizeof (hbmsg_t)); 
+        	if (hbmsg == NULL) {
+			printf ("Failed to allocate buffer for sending\n");
+			sleep(1);
+			continue;
+		}
+		hbmsg->instance = plc->instance;
+		hbmsg->mode = plc->mode;
+		hbmsg->current_state = plc->state->current_state; 
+		status = SSAPI_mesg_AsyncSend (plc->conn, hbmsg,
+						   sizeof(hbmsg_t));
+        	if (status < 0) {
+			printf ("Failed to send hb message. Status = %d\n",
+				 status);
+			SSAPI_mesg_FreeBuffer(hbmsg);
+		}
+
+		usleep (HB_LOOP_PERIOD_USEC);
+	}
+
+	/*
+	 * Our peer died. Clean up and exit this thread. When peer 
+	 * comes back to life, we'll restart our client thread.
+	 */
+	printf ("Client thread exiting...\n");
+	SSAPI_mesg_AsyncChanDisconnect (plc->conn);
+	pthread_exit (0);
+}
+
+static void sighand (int signo)
+{
+	printf("SIGALRM received\n");
+	hb_client_run = 0; 
+}

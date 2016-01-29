@@ -48,10 +48,11 @@ int main(int argc, char *argv[])
 	int connection_type=0;
 	char ip_address[80];
 	int reset_command=FALSE;
+	int instance;
 
 	// read command line args
-	if (argc <= 2) {
-		fprintf(stderr,"Usage:\n%s m|r <modbus_slave_ip_address> \n", argv[0]);
+	if (argc <= 3) {
+		fprintf(stderr,"Usage:\n%s m|r <modbus_slave_ip_address> <instance (1 or 2)> \n", argv[0]);
 		fprintf(stderr,"\t\t\t-or-\n");
 		fprintf(stderr,"%s t\n",argv[0]);
 		fprintf(stderr,"\t\t\tm=modbus tcp protocol\n");
@@ -81,27 +82,40 @@ int main(int argc, char *argv[])
 				
 	}
 	
+	if (*argv[3]=='1')
+		instance = 1;
+	else
+		instance = 2;
+
 	// allocate a state variable table
 	svt = malloc(sizeof(plc_state_t));
 
 	// initialize the virtual plc
 	if (connection_type == PLC_CONNECTION_MODBUS) {
-		plc = plc_init_modbus(ip_address, IP_PORT, MB_SLAVE_ID, DEMO_DIG_INPUTS, DEMO_DIG_OUTPUTS, FALSE);
+		plc = plc_init_modbus(ip_address, instance, IP_PORT, MB_SLAVE_ID, DEMO_DIG_INPUTS, DEMO_DIG_OUTPUTS, FALSE);
 		if (reset_command == TRUE) {
 			sorter_reset(plc,svt);
 			plc_shutdown(plc);
 			exit(0);
 		}
+
+		/* Initialize the heartbeat */
+		plc_init_heartbeat(plc);
 	}
 	else if (connection_type == PLC_CONNECTION_TIPC)
 		plc=plc_init_tipc_client(SERVER_TYPE, SERVER_INST, 10000, DEMO_DIG_INPUTS, DEMO_DIG_OUTPUTS, FALSE);
 	else
 		exit(-1);
 	
-	svt->current_state=STATE_NOT_READY;
+        /* skip the reset if not active */
+	if (plc->mode == MODE_ACTIVE)
+		svt->current_state = STATE_NOT_READY;
+	else
+		svt->current_state = STATE_READY;
+
 
 	/* 
-	 * This is the main loop, which runs forever at at a fixed period (20ms) 
+	 * This is the main loop, which runs forever at a fixed period (20ms) 
 	 * 
 	 */
 	printf("Entering main loop\n");
@@ -120,7 +134,11 @@ int main(int argc, char *argv[])
 			break;
 
 		case STATE_READY :
-			printf("%s\n",state_strings[svt->current_state]);
+			//printf("%s\n",state_strings[svt->current_state]);
+ 			printf("%s - %s\n",
+                               state_strings[svt->current_state],
+			       (plc->mode == MODE_ACTIVE ? "ACTIVE":"STANDBY"));
+
 			// we're ready, so turn on box emitter and go to next state
 			plc_state_read(plc,svt);
 			svt->DO[DO_EMITTER_01]=TRUE;
