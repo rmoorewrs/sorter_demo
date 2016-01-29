@@ -39,6 +39,7 @@ enum {
 
 // set up global state variable table
 typedef struct _plc_state {
+	int current_state;
 	uint8_t	status;
 	uint8_t nDI;
 	uint8_t nDO;
