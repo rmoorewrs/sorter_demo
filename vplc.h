@@ -25,8 +25,8 @@
 #define MODBUS_RESPONSE_TIMEOUT_USEC	0
 
 enum {
-	MODE_ACTIVE = 0,
-	MODE_STANDBY
+	MODE_STANDBY = 0,
+	MODE_ACTIVE = 1
 };
 
 typedef struct heartbeat_msg
