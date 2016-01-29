@@ -197,8 +197,6 @@ int plc_state_update(plc_t *plc)
 		 * Our peer is alive, now that we're receiving heartbeats again
 		 */
 		if (!hb_client_run) {
-			printf ("Restarting heartbeat client thread...\n");
-
 	 		/* Switch us to STANDBY mode if our peer is ACTIVE. */
 			if ((plc->mode == MODE_ACTIVE) &&
 			    (plc->other_mode == MODE_ACTIVE)) {
@@ -207,6 +205,7 @@ int plc_state_update(plc_t *plc)
 			}
 
 			/* Restart our heartbeat client */
+			printf ("Restarting heartbeat client thread...\n");
 			plc->conn = NULL;
 			hb_client_run = 1;
 			if (pthread_create (&plc->client_thread, NULL,
@@ -271,6 +270,17 @@ void plc_init_heartbeat (plc_t *plc)
 {
 	pthread_t server_thread;
 
+	/* Create initial heartbeat client thread */
+	if (!hb_client_run) {
+		plc->conn = NULL;
+		hb_client_run = 1;
+		if (pthread_create (&plc->client_thread, NULL,
+				    hb_client, (void *)plc)) {
+			fprintf(stderr, "Error creating client thread\n");
+			exit (-1);
+		}
+	}
+
 	/* Create a pthread to receive heartbeat messages */
 	if (pthread_create (&server_thread, NULL, hb_server, (void *)plc)) {
 		fprintf(stderr, "Error creating server thread\n");
@@ -292,17 +302,6 @@ void plc_init_heartbeat (plc_t *plc)
 		printf("Setting to MODE_STANDBY\n");
 	}
 	sem_post (&hb_mutex);
-
-	/* Create initial heartbeat client thread */
-	if (!hb_client_run) {
-		plc->conn = NULL;
-		hb_client_run = 1;
-		if (pthread_create (&plc->client_thread, NULL,
-				    hb_client, (void *)plc)) {
-			fprintf(stderr, "Error creating client thread\n");
-			exit (-1);
-		}
-	}
 }
 
 plc_t *plc_init_modbus(char* net_addr, int instance, int net_port, int modbus_addr, int nDI, int nDO, int debug_flag)
@@ -704,6 +703,7 @@ static void *hb_client (void *param)
 	if (plc->conn == NULL) {
 		fprintf (stderr, "No other sorter instance found - "
 			 "disabling heartbeat\n");
+		hb_client_run = 0;
 		pthread_exit (0);
 	}
 
